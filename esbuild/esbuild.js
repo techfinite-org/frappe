@@ -222,7 +222,7 @@ function get_files_to_build(files) {
 
 function build_files({ files, outdir }) {
 	let build_plugins = [html_plugin, build_cleanup_plugin, vue()];
-	return esbuild.build(get_build_options(files, outdir, build_plugins));
+	return run_esbuild(get_build_options(files, outdir, build_plugins));
 }
 
 function build_style_files({ files, outdir, rtl_style = false }) {
@@ -241,7 +241,7 @@ function build_style_files({ files, outdir, rtl_style = false }) {
 	];
 
 	plugins.push(require("autoprefixer"));
-	return esbuild.build(get_build_options(files, outdir, build_plugins));
+	return run_esbuild(get_build_options(files, outdir, build_plugins));
 }
 
 function get_build_options(files, outdir, plugins) {
@@ -258,41 +258,47 @@ function get_build_options(files, outdir, plugins) {
 		define: {
 			"process.env.NODE_ENV": JSON.stringify(PRODUCTION ? "production" : "development"),
 		},
-		plugins: plugins,
-		watch: get_watch_config(),
+		plugins: plugins
+		// watch: removed – handled separately via context()
 	};
+}
+
+async function run_esbuild(options) {
+	if (WATCH_MODE) {
+		const ctx = await esbuild.context(options);
+		await ctx.watch(get_watch_config());
+		return ctx; // contains result.metafile etc.
+	} else {
+		return esbuild.build(options);
+	}
 }
 
 function get_watch_config() {
 	if (WATCH_MODE) {
-		return {
-			async onRebuild(error, result) {
-				if (error) {
-					log_error("There was an error during rebuilding changes.");
-					log();
-					log(chalk.dim(error.stack));
-					notify_redis({ error });
-				} else {
-					let { new_assets_json, prev_assets_json } = await write_assets_json(
-						result.metafile
-					);
+		return async function onRebuild(error, result) {
+			if (error) {
+				log_error("There was an error during rebuilding changes.");
+				log();
+				log(chalk.dim(error.stack));
+				await notify_redis({ error });
+			} else {
+				let { new_assets_json, prev_assets_json } = await write_assets_json(result.metafile);
 
-					let changed_files;
-					if (prev_assets_json) {
-						changed_files = get_rebuilt_assets(prev_assets_json, new_assets_json);
+				let changed_files;
+				if (prev_assets_json) {
+					changed_files = get_rebuilt_assets(prev_assets_json, new_assets_json);
 
-						let timestamp = new Date().toLocaleTimeString();
-						let message = `${timestamp}: Compiled ${changed_files.length} files...`;
-						log(chalk.yellow(message));
-						for (let filepath of changed_files) {
-							let filename = path.basename(filepath);
-							log("    " + filename);
-						}
-						log();
+					let timestamp = new Date().toLocaleTimeString();
+					let message = `${timestamp}: Compiled ${changed_files.length} files...`;
+					log(chalk.yellow(message));
+					for (let filepath of changed_files) {
+						let filename = path.basename(filepath);
+						log("    " + filename);
 					}
-					notify_redis({ success: true, changed_files });
+					log();
 				}
-			},
+				await notify_redis({ success: true, changed_files });
+			}
 		};
 	}
 	return null;
